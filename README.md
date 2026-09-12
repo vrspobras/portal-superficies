@@ -1,24 +1,20 @@
-# Portal de Superfícies — Codespaces
+# Portal de Superfícies — Codespaces v2
 
-Portal local/remoto para SAU3 e SAU4, com leitura de TXT e geração de TIN em Python.
+Portal local/remoto para SAU3 e SAU4, preparado para GitHub Codespaces.
 
-## Rodar no GitHub Codespaces
-
-1. Crie um repositório no GitHub e envie estes arquivos.
-2. Abra o repositório e use **Code → Codespaces → Create codespace on main**.
-3. Aguarde o Codespace criar o ambiente e instalar `numpy` e `scipy`.
-4. No terminal do Codespace, execute:
+## Executar
 
 ```bash
 python app.py
 ```
 
-5. O Codespaces deve encaminhar a porta 8000; abra o endereço mostrado na aba **Ports**.
+Abra a porta 8000 em **Ports → Open in Browser**.
 
-## Teste de saúde
+## Recursos
 
-Abra `/api/test` e confirme `{"ok": true}`.
-
-## Observação
-
-O Codespace é uma máquina virtual remota criada para o projeto. O navegador do seu computador acessa o portal pelo encaminhamento da porta; o `python.exe` não é executado na sua máquina corporativa.
+- TXT/CSV e LandXML/XML
+- TIN automático
+- edição/remocão de arestas do TIN
+- seção A-B por coordenadas ou seleção na planta
+- comparação de perfil com outra superfície
+- persistência das evoluções em `data/SAU3` e `data/SAU4`
