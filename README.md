@@ -1,20 +1,20 @@
-# Portal de Superfícies — Codespaces V7
+# Portal de Superfícies — Codespaces V8
 
-Portal local no GitHub Codespaces para SAU3 e SAU4.
+Base do portal para SAU3 e SAU4.
 
-## Novidades desta versão
-- Base CAD completa da SAU4 a partir do DXF fornecido pelo usuário, usando a geometria do Model expandida em blocos.
-- Camada Base CAD sobre a planta/satélite.
-- Seções continuam cortando o TIN e agora recebem interseções da Base CAD quando as entidades têm Z útil.
-- Importação TXT/CSV e LandXML.
-- TIN, edição de arestas, breakline, comparação e projeto BASE.
+Correções desta versão:
+- Ao gerar/abrir uma superfície, a visualização 3D aparece imediatamente.
+- Retorno 3D ↔ Planta sem travamento.
+- Menu Projetos fica sobre o mapa e pode ser aberto na planta.
+- Limite de zoom do satélite para evitar "Map data not yet available".
+- Navegação por menus continua disponível em todas as telas.
+- Base CAD da SAU4 mantida.
 
-## Executar
+Execução no Codespaces:
+
 ```bash
 pip install -r requirements.txt
 python app.py
 ```
-Abra a porta 8000.
 
-## Referencial
-SIRGAS 2000 / UTM 22S (EPSG:31982).
+Abra a porta 8000.
