@@ -1,20 +1,13 @@
-# Portal de Superfícies — Codespaces v2
+# Portal de Superfícies — Codespaces V3
 
-Portal local/remoto para SAU3 e SAU4, preparado para GitHub Codespaces.
+Portal local/remoto para SAU3 e SAU4 com TIN, TXT/CSV, LandXML e visualização em planta com imagem de satélite.
 
 ## Executar
-
 ```bash
+pip install -r requirements.txt
 python app.py
 ```
+Abra a porta 8000 no Codespaces.
 
-Abra a porta 8000 em **Ports → Open in Browser**.
-
-## Recursos
-
-- TXT/CSV e LandXML/XML
-- TIN automático
-- edição/remocão de arestas do TIN
-- seção A-B por coordenadas ou seleção na planta
-- comparação de perfil com outra superfície
-- persistência das evoluções em `data/SAU3` e `data/SAU4`
+## Referencial
+Os dados de engenharia são tratados como SIRGAS 2000 / UTM 22S (EPSG:31982). A planta web converte a visualização para latitude/longitude apenas para posicionamento cartográfico.
