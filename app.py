@@ -135,6 +135,116 @@ def geojson_surface(mesh):
     for v in vs:
         lon,lat=TRANSFORM.transform(v['east'],v['north']);features.append({'type':'Feature','properties':{'id':v['id'],'description':v['description'],'z':v['z'],'east':v['east'],'north':v['north']},'geometry':{'type':'Point','coordinates':[lon,lat]}})
     return {'type':'FeatureCollection','features':features}
+
+def base_path(sau):
+    if sau not in ALLOWED: raise ValueError('SAU inválida')
+    folder=DATA/sau; folder.mkdir(parents=True, exist_ok=True)
+    return folder/'base.json'
+
+def get_base(sau):
+    p=base_path(sau)
+    if not p.exists(): return None
+    return json.loads(p.read_text())
+
+def save_base(sau,name,filename,source,pts,mesh):
+    payload={'id':'BASE','name':name or 'Projeto Final - Base','filename':filename,'source':source,'created':__import__('datetime').datetime.now().isoformat(timespec='seconds'),'points_raw':pts,'mesh':mesh}
+    base_path(sau).write_text(json.dumps(payload,ensure_ascii=False))
+    return payload
+
+def load_mesh_for_ref(sau,ref):
+    if ref in (None,'','__BASE__','BASE'):
+        b=get_base(sau)
+        if not b: raise ValueError('Projeto final (Base) ainda não foi cadastrado para esta SAU.')
+        return b['mesh']
+    return load_surface(sau,ref)['mesh']
+
+def edge_key(a,b): return (a,b) if a<b else (b,a)
+
+def remove_edge_from_mesh(mesh,a,b):
+    a,b=int(a),int(b)
+    faces=mesh['faces']
+    adj=[];keep=[]
+    for f in faces:
+        if a in f and b in f: adj.append(f)
+        else: keep.append(f)
+    if not adj:
+        raise ValueError('Aresta não encontrada.')
+    if len(adj)==1:
+        newfaces=keep
+        action='boundary_hole'
+    else:
+        # Interior edge: replace the selected diagonal by the opposite diagonal.
+        others=[]
+        for f in adj:
+            others.extend([x for x in f if x not in (a,b)])
+        if len(others)!=2 or others[0]==others[1]:
+            raise ValueError('Não foi possível identificar os triângulos adjacentes.')
+        c,d=others
+        newfaces=keep+[[c,d,a],[d,c,b]]
+        action='flip_to_opposite_diagonal'
+    out=dict(mesh);out['faces']=newfaces;out['triangles']=len(newfaces)
+    return out,action
+
+def reset_mesh_from_points(payload):
+    pts=payload.get('points_raw') or []
+    return build_tin(pts)
+
+try:
+    from shapely.geometry import Polygon, Point
+    from shapely.strtree import STRtree
+    HAVE_SHAPELY=True
+except Exception:
+    HAVE_SHAPELY=False
+
+def triangle_plane_z(v1,v2,v3,x,y):
+    x1,y1,z1=v1['east'],v1['north'],v1['z']; x2,y2,z2=v2['east'],v2['north'],v2['z']; x3,y3,z3=v3['east'],v3['north'],v3['z']
+    den=(x2-x1)*(y3-y1)-(y2-y1)*(x3-x1)
+    if abs(den)<1e-12: return None
+    return z1 + ((z2-z1)*(y3-y1)-(z3-z1)*(y2-y1))*(x-x1)/den + (-(z2-z1)*(x3-x1)+(z3-z1)*(x2-x1))*(y-y1)/den
+
+def compare_tins(mesh_a,mesh_b):
+    if not HAVE_SHAPELY: raise ValueError('Shapely não está instalado no ambiente.')
+    va,vb=mesh_a['vertices'],mesh_b['vertices']
+    polys=[]; valid_b=[]
+    for j,f in enumerate(mesh_b['faces']):
+        coords=[(vb[i]['east'],vb[i]['north']) for i in f]
+        poly=Polygon(coords)
+        if poly.is_valid and poly.area>0:
+            polys.append(poly);valid_b.append(j)
+    if not polys: raise ValueError('A superfície de referência não possui triângulos válidos.')
+    tree=STRtree(polys)
+    cut=fill=area=wsum=0.0
+    va_idx=list(range(len(va)))
+    for f in mesh_a['faces']:
+        ca=[(va[i]['east'],va[i]['north']) for i in f]
+        pa=Polygon(ca)
+        if not pa.is_valid or pa.area<=0: continue
+        for hit in tree.query(pa, predicate='intersects'):
+            # shapely 2 returns integer indices; support older versions returning geometry objects.
+            if isinstance(hit,(int,np.integer)):
+                j=int(hit); pb=polys[j]; fb=mesh_b['faces'][valid_b[j]]
+            else:
+                try:j=polys.index(hit)
+                except ValueError: continue
+                pb=hit; fb=mesh_b['faces'][valid_b[j]]
+            inter=pa.intersection(pb)
+            if inter.is_empty: continue
+            geoms=list(getattr(inter,'geoms',[])) if inter.geom_type=='GeometryCollection' else [inter]
+            for g in geoms:
+                if g.geom_type not in ('Polygon','MultiPolygon') or g.area<=1e-9: continue
+                parts=list(g.geoms) if g.geom_type=='MultiPolygon' else [g]
+                for part in parts:
+                    area_i=part.area
+                    c=part.centroid
+                    za=triangle_plane_z(*(va[i] for i in f),c.x,c.y)
+                    zb=triangle_plane_z(*(vb[i] for i in fb),c.x,c.y)
+                    if za is None or zb is None: continue
+                    diff=za-zb
+                    vol=area_i*diff
+                    area+=area_i;wsum+=vol
+                    if diff>=0: cut+=vol
+                    else: fill-=vol
+    return {'method':'TIN × TIN','cut':cut,'fill':fill,'net':cut-fill,'area':area,'mean_diff':(wsum/area if area else 0.0)}
 class Handler(BaseHTTPRequestHandler):
     def _send(self,code,data,ctype='application/json; charset=utf-8'):
         body=data if isinstance(data,bytes) else data.encode('utf-8');self.send_response(code);self.send_header('Content-Type',ctype);self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body)
@@ -153,6 +263,12 @@ class Handler(BaseHTTPRequestHandler):
             p=u.path.split('/');sau=p[3].upper();sid=p[4]
             try:return self._json(200,load_surface(sau,sid))
             except Exception as e:return self._json(404,{'error':str(e)})
+        if u.path.startswith('/api/base/'):
+            sau=u.path.split('/')[3].upper()
+            try:
+                b=get_base(sau)
+                return self._json(200,b) if b else self._json(404,{'error':'Base não cadastrada.'})
+            except Exception as e:return self._json(400,{'error':str(e)})
         return self._send(404,b'Not found','text/plain; charset=utf-8')
     def _multipart(self,body,ctype):
         m=re.search(r'boundary=(?:"([^"]+)"|([^;]+))',ctype)
@@ -176,13 +292,34 @@ class Handler(BaseHTTPRequestHandler):
                 sau=fields.get('sau','SAU3').upper();name=fields.get('name','').strip() or Path(filename).stem
                 if sau not in ALLOWED:raise ValueError('SAU inválida.')
                 pts,faces,source=parse_file(filename,file_bytes);mesh=build_tin(pts,faces);return self._json(200,{'ok':True,'surface':save_surface(sau,name,filename,source,pts,mesh)})
+            if u.path=='/api/base_upload':
+                fields,filename,file_bytes=self._multipart(body,self.headers.get('Content-Type',''))
+                if not file_bytes or not filename: raise ValueError('Nenhum arquivo recebido.')
+                sau=fields.get('sau','SAU3').upper(); name=fields.get('name','').strip() or Path(filename).stem
+                if sau not in ALLOWED: raise ValueError('SAU inválida.')
+                pts,faces,source=parse_file(filename,file_bytes); mesh=build_tin(pts,faces); return self._json(200,{'ok':True,'base':save_base(sau,name,filename,source,pts,mesh)})
+            if u.path=='/api/base_delete':
+                d=json.loads(body or b'{}'); sau=d.get('sau','').upper();
+                p=base_path(sau)
+                if not p.exists(): raise ValueError('Base não encontrada.')
+                p.unlink(); return self._json(200,{'ok':True})
+            if u.path=='/api/edit_edge':
+                d=json.loads(body or b'{}'); sau=d.get('sau','').upper(); sid=d.get('id'); edge=d.get('edge') or []
+                if sau not in ALLOWED or not sid or len(edge)!=2: raise ValueError('Aresta inválida.')
+                payload=load_surface(sau,sid); mesh,action=remove_edge_from_mesh(payload['mesh'],edge[0],edge[1]); payload['mesh']=mesh; save_payload(sau,payload); return self._json(200,{'ok':True,'action':action,'surface':payload})
+            if u.path=='/api/reset_tin':
+                d=json.loads(body or b'{}'); sau=d.get('sau','').upper(); sid=d.get('id')
+                payload=load_surface(sau,sid); payload['mesh']=reset_mesh_from_points(payload); save_payload(sau,payload); return self._json(200,{'ok':True,'surface':payload})
+            if u.path=='/api/compare':
+                d=json.loads(body or b'{}'); sau=d.get('sau','').upper(); sid=d.get('id'); ref=d.get('reference_id')
+                payload=load_surface(sau,sid); refmesh=load_mesh_for_ref(sau,ref); return self._json(200,compare_tins(payload['mesh'],refmesh))
             if u.path=='/api/delete':
                 d=json.loads(body or b'{}');sau=d.get('sau','').upper();sid=d.get('id','');p=DATA/sau/f'{sid}.json'
                 if sau not in ALLOWED or not p.exists():raise ValueError('Superfície não encontrada.')
                 p.unlink();return self._json(200,{'ok':True})
             if u.path=='/api/section':
                 d=json.loads(body or b'{}');sau=d.get('sau','').upper();sid=d.get('id');A=(fnum(d['A']['east']),fnum(d['A']['north']));B=(fnum(d['B']['east']),fnum(d['B']['north']));res=section_profile(load_surface(sau,sid)['mesh'],A,B,d.get('samples',500));ref=d.get('reference_id')
-                if ref:res['reference']=section_profile(load_surface(sau,ref)['mesh'],A,B,d.get('samples',500))
+                if ref:res['reference']=section_profile(load_mesh_for_ref(sau,ref),A,B,d.get('samples',500))
                 return self._json(200,res)
             raise ValueError('Endpoint não encontrado.')
         except Exception as e:return self._json(400,{'error':str(e)})
