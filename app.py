@@ -132,8 +132,8 @@ def geojson_surface(mesh):
         for idx in f+[f[0]]:
             lon,lat=TRANSFORM.transform(vs[idx]['east'],vs[idx]['north']);coords.append([lon,lat])
         features.append({'type':'Feature','properties':{'zavg':sum(vs[i]['z'] for i in f)/3},'geometry':{'type':'Polygon','coordinates':[coords]}})
-    for v in vs:
-        lon,lat=TRANSFORM.transform(v['east'],v['north']);features.append({'type':'Feature','properties':{'id':v['id'],'description':v['description'],'z':v['z'],'east':v['east'],'north':v['north']},'geometry':{'type':'Point','coordinates':[lon,lat]}})
+    for ii,v in enumerate(vs):
+        lon,lat=TRANSFORM.transform(v['east'],v['north']);features.append({'type':'Feature','properties':{'index':ii,'id':v['id'],'description':v['description'],'z':v['z'],'east':v['east'],'north':v['north']},'geometry':{'type':'Point','coordinates':[lon,lat]}})
     return {'type':'FeatureCollection','features':features}
 
 def base_path(sau):
@@ -160,6 +160,65 @@ def load_mesh_for_ref(sau,ref):
 
 def edge_key(a,b): return (a,b) if a<b else (b,a)
 
+
+def orient2d(a,b,c):
+    return (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])
+
+def segments_proper(a,b,c,d,eps=1e-9):
+    o1=orient2d(a,b,c); o2=orient2d(a,b,d); o3=orient2d(c,d,a); o4=orient2d(c,d,b)
+    return ((o1>eps and o2<-eps) or (o1<-eps and o2>eps)) and ((o3>eps and o4<-eps) or (o3<-eps and o4>eps))
+
+def mesh_edges(mesh):
+    out=set()
+    for f in mesh['faces']:
+        for i in range(3): out.add(edge_key(f[i],f[(i+1)%3]))
+    return out
+
+def recover_breakline(mesh, chain, max_iter=20000):
+    chain=[int(x) for x in chain]
+    if len(chain)<2: raise ValueError('Uma breakline precisa de pelo menos 2 vértices.')
+    n=len(mesh['vertices'])
+    if any(i<0 or i>=n for i in chain): raise ValueError('Breakline contém vértice inválido.')
+    chain2=[]
+    for i in chain:
+        if not chain2 or chain2[-1]!=i: chain2.append(i)
+    for u,v in zip(chain2,chain2[1:]):
+        if u==v: continue
+        A=(mesh['vertices'][u]['east'],mesh['vertices'][u]['north']); B=(mesh['vertices'][v]['east'],mesh['vertices'][v]['north'])
+        for _ in range(max_iter):
+            edges=mesh_edges(mesh)
+            target=edge_key(u,v)
+            if target in edges: break
+            crossings=[]
+            for a,b in edges:
+                if u in (a,b) or v in (a,b): continue
+                C=(mesh['vertices'][a]['east'],mesh['vertices'][a]['north']); D=(mesh['vertices'][b]['east'],mesh['vertices'][b]['north'])
+                if segments_proper(A,B,C,D): crossings.append((a,b))
+            if not crossings:
+                raise ValueError(f'Não foi possível encaixar a breakline entre os vértices {mesh["vertices"][u]["id"]} e {mesh["vertices"][v]["id"]}.')
+            flipped=False
+            for a,b in crossings:
+                adj=[];keep=[]
+                for f in mesh['faces']:
+                    if a in f and b in f: adj.append(f)
+                    else: keep.append(f)
+                if len(adj)!=2: continue
+                c=next(x for x in adj[0] if x not in (a,b)); d=next(x for x in adj[1] if x not in (a,b))
+                P=[(mesh['vertices'][i]['east'],mesh['vertices'][i]['north']) for i in (a,b,c,d)]
+                if orient2d(P[0],P[1],P[2])*orient2d(P[0],P[1],P[3])>=0: continue
+                if orient2d(P[2],P[3],P[0])*orient2d(P[2],P[3],P[1])>=0: continue
+                newe=edge_key(c,d)
+                if newe in edges and newe!=target: continue
+                mesh['faces']=keep+[[c,d,a],[d,c,b]]
+                flipped=True; break
+            if not flipped:
+                raise ValueError(f'Não foi possível recuperar a breakline entre os vértices {mesh["vertices"][u]["id"]} e {mesh["vertices"][v]["id"]}.')
+        else:
+            raise ValueError('Limite de iterações atingido ao recuperar a breakline.')
+    mesh['triangles']=len(mesh['faces'])
+    mesh['breaklines']=mesh.get('breaklines',[])+[chain2]
+    return mesh
+
 def remove_edge_from_mesh(mesh,a,b):
     a,b=int(a),int(b)
     faces=mesh['faces']
@@ -184,6 +243,26 @@ def remove_edge_from_mesh(mesh,a,b):
         action='flip_to_opposite_diagonal'
     out=dict(mesh);out['faces']=newfaces;out['triangles']=len(newfaces)
     return out,action
+
+
+
+def flip_edge_in_mesh(mesh,a,b):
+    a,b=int(a),int(b)
+    adj=[];keep=[]
+    for f in mesh['faces']:
+        if a in f and b in f: adj.append(f)
+        else: keep.append(f)
+    if len(adj)!=2:
+        raise ValueError('A diagonal interna com dois triângulos adjacentes é necessária.')
+    others=[]
+    for f in adj:
+        others.append(next(x for x in f if x not in (a,b)))
+    c,d=others
+    if c==d: raise ValueError('Não foi possível identificar os vértices opostos.')
+    # Ensure the new diagonal c-d replaces a-b.
+    newfaces=keep+[[c,d,a],[d,c,b]]
+    out=dict(mesh);out['faces']=newfaces;out['triangles']=len(newfaces)
+    return out
 
 def reset_mesh_from_points(payload):
     pts=payload.get('points_raw') or []
@@ -303,6 +382,14 @@ class Handler(BaseHTTPRequestHandler):
                 p=base_path(sau)
                 if not p.exists(): raise ValueError('Base não encontrada.')
                 p.unlink(); return self._json(200,{'ok':True})
+            if u.path=='/api/breakline':
+                d=json.loads(body or b'{}'); sau=d.get('sau','').upper(); sid=d.get('id'); chain=d.get('chain') or []
+                if sau not in ALLOWED or not sid: raise ValueError('Superfície inválida.')
+                payload=load_surface(sau,sid); payload['mesh']=recover_breakline(payload['mesh'],chain); save_payload(sau,payload); return self._json(200,{'ok':True,'surface':payload})
+            if u.path=='/api/flip_edge':
+                d=json.loads(body or b'{}'); sau=d.get('sau','').upper(); sid=d.get('id'); edge=d.get('edge') or []
+                if sau not in ALLOWED or not sid or len(edge)!=2: raise ValueError('Aresta inválida.')
+                payload=load_surface(sau,sid); payload['mesh']=flip_edge_in_mesh(payload['mesh'],edge[0],edge[1]); save_payload(sau,payload); return self._json(200,{'ok':True,'surface':payload})
             if u.path=='/api/edit_edge':
                 d=json.loads(body or b'{}'); sau=d.get('sau','').upper(); sid=d.get('id'); edge=d.get('edge') or []
                 if sau not in ALLOWED or not sid or len(edge)!=2: raise ValueError('Aresta inválida.')
