@@ -324,6 +324,63 @@ def compare_tins(mesh_a,mesh_b):
                     if diff>=0: cut+=vol
                     else: fill-=vol
     return {'method':'TIN × TIN','cut':cut,'fill':fill,'net':cut-fill,'area':area,'mean_diff':(wsum/area if area else 0.0)}
+BASE_CAD_FILES={'SAU4':'base_cad.json'}
+def cad_path(sau):
+    if sau not in ALLOWED: raise ValueError('SAU inválida')
+    folder=DATA/sau; folder.mkdir(parents=True,exist_ok=True)
+    return folder/BASE_CAD_FILES.get(sau,'base_cad.json')
+
+def load_base_cad(sau):
+    p=cad_path(sau)
+    if not p.exists(): return None
+    return json.loads(p.read_text())
+
+def cad_geojson(cad):
+    features=[]
+    for g in cad.get('geometry',[]):
+        pts=g.get('points',[])
+        if not pts: continue
+        layer=g.get('layer','0')
+        typ=g.get('type')
+        if typ=='POINT':
+            x,y=pts[0][0],pts[0][1]; lon,lat=TRANSFORM.transform(x,y)
+            features.append({'type':'Feature','properties':{'layer':layer,'cad_type':typ,'z':pts[0][2]},'geometry':{'type':'Point','coordinates':[lon,lat]}})
+        elif len(pts)>=2:
+            coords=[]
+            for x,y,z in pts:
+                lon,lat=TRANSFORM.transform(x,y); coords.append([lon,lat])
+            if g.get('closed') and coords[0]!=coords[-1]: coords.append(coords[0])
+            features.append({'type':'Feature','properties':{'layer':layer,'cad_type':typ},'geometry':{'type':'LineString','coordinates':coords}})
+    return {'type':'FeatureCollection','features':features,'source':cad.get('source',''),'sau':cad.get('sau','')}
+
+def segment_intersection_param(a,b,c,d,eps=1e-10):
+    ax,ay=a; bx,by=b; cx,cy=c; dx,dy=d
+    rx,ry=bx-ax,by-ay; sx,sy=dx-cx,dy-cy
+    den=rx*sy-ry*sx
+    if abs(den)<eps:return None
+    qpx,qpy=cx-ax,cy-ay
+    t=(qpx*sy-qpy*sx)/den; u=(qpx*ry-qpy*rx)/den
+    if -eps<=t<=1+eps and -eps<=u<=1+eps:return max(0.0,min(1.0,t))
+    return None
+
+def section_cad_intersections(cad,A,B):
+    if not cad:return []
+    ae,an=A;be,bn=B;out=[];dx=be-ae;dy=bn-an;L=math.hypot(dx,dy)
+    if L<=1e-9:return out
+    for g in cad.get('geometry',[]):
+        pts=g.get('points',[])
+        if len(pts)<2:continue
+        for i in range(len(pts)-1):
+            p1,p2=pts[i],pts[i+1]
+            t=segment_intersection_param((ae,an),(be,bn),(p1[0],p1[1]),(p2[0],p2[1]))
+            if t is None:continue
+            z=None
+            z1,z2=p1[2],p2[2]
+            if abs(z1)>1e-9 or abs(z2)>1e-9:
+                z=z1+(z2-z1)*(t if math.hypot(p2[0]-p1[0],p2[1]-p1[1])>1e-12 else 0)
+            out.append({'distance':L*t,'east':ae+dx*t,'north':an+dy*t,'z':z,'layer':g.get('layer','0'),'cad_type':g.get('type','')})
+    return out
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self,code,data,ctype='application/json; charset=utf-8'):
         body=data if isinstance(data,bytes) else data.encode('utf-8');self.send_response(code);self.send_header('Content-Type',ctype);self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body)
@@ -342,6 +399,12 @@ class Handler(BaseHTTPRequestHandler):
             p=u.path.split('/');sau=p[3].upper();sid=p[4]
             try:return self._json(200,load_surface(sau,sid))
             except Exception as e:return self._json(404,{'error':str(e)})
+        if u.path.startswith('/api/base_cad/'):
+            sau=u.path.split('/')[3].upper()
+            try:
+                c=load_base_cad(sau)
+                return self._json(200,cad_geojson(c)) if c else self._json(404,{'error':'Base CAD não cadastrada.'})
+            except Exception as e:return self._json(400,{'error':str(e)})
         if u.path.startswith('/api/base/'):
             sau=u.path.split('/')[3].upper()
             try:
@@ -407,6 +470,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path=='/api/section':
                 d=json.loads(body or b'{}');sau=d.get('sau','').upper();sid=d.get('id');A=(fnum(d['A']['east']),fnum(d['A']['north']));B=(fnum(d['B']['east']),fnum(d['B']['north']));res=section_profile(load_surface(sau,sid)['mesh'],A,B,d.get('samples',500));ref=d.get('reference_id')
                 if ref:res['reference']=section_profile(load_mesh_for_ref(sau,ref),A,B,d.get('samples',500))
+                cad=load_base_cad(sau)
+                if cad:res['base_cad']=section_cad_intersections(cad,A,B)
                 return self._json(200,res)
             raise ValueError('Endpoint não encontrado.')
         except Exception as e:return self._json(400,{'error':str(e)})
